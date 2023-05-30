@@ -1,0 +1,447 @@
+import System.Random (randomRIO)
+import Data.Char (toUpper)
+
+data Cell = Mine | Empty | Number Int deriving (Eq)
+
+type Board = [[Cell]]
+
+type Position = (Int, Int)
+
+data GameStatus = InProgress | GameOver | Victory deriving (Eq)
+
+data GameState = GameState
+  { board :: Board
+  , bombPositions :: [Position]
+  , markedPositions :: [Position]
+  , gameStatus :: GameStatus
+  }
+
+-- Função principal para iniciar o jogo
+main :: IO ()
+main = do
+  putStrLn "Bem-vindo ao Campo Minado!"
+  size <- getInput "Digite o tamanho do tabuleiro (um número inteiro): "
+  bombs <- getInput "Digite o número de bombas: "
+  let boardSize = max 2 size
+  let bombCount = min (boardSize * boardSize `div` 2) (max 1 bombs)
+  initialState <- generateInitialState boardSize bombCount
+  playGame initialState
+
+-- Gera o estado inicial do jogo com o tabuleiro vazio
+generateInitialState :: Int -> Int -> IO GameState
+generateInitialState size bombCount = do
+  positions <- generateBombPositions size bombCount
+  let emptyRow = replicate size Empty
+  let emptyBoard = replicate size emptyRow
+  return $ GameState emptyBoard positions [] InProgress
+
+-- Gera aleatoriamente as posições das bombas
+generateBombPositions :: Int -> Int -> IO [Position]
+generateBombPositions size bombCount = do
+  let positions = [(x, y) | x <- [0 .. size - 1], y <- [0 .. size - 1]]
+  bombIndexes <- take bombCount <$> shuffle [0 .. size * size - 1]
+  return $ map (positions !!) bombIndexes
+
+-- Embaralha uma lista usando o algoritmo de Fisher-Yates
+shuffle :: [a] -> IO [a]
+shuffle xs = do
+  let len = length xs
+  ar <- newArray_ (0, len - 1)
+  forM_ [0 .. len - 1] $ \i -> do
+    j <- randomRIO (0, i)
+    vi <- readArray ar i
+    vj <- readArray ar j
+    writeArray ar j vi
+    writeArray ar i vj
+  getElems ar
+
+-- Executa o loop principal do jogo
+playGame :: GameState -> IO ()
+playGame state = do
+  printBoard state
+  case gameStatus state of
+    GameOver -> putStrLn "Game Over! Você foi explodido!"
+    Victory -> putStrLn "Parabéns! Você venceu!"
+    _ -> do
+      input <- getInput "Digite um comando (posição a abrir, +posição para marcar, -posição para desmarcar): "
+      newState <- handleCommand state input
+      playGame newState
+
+-- Manipula o comando inserido pelo jogador
+handleCommand :: GameState -> String -> IO GameState
+handleCommand state input =
+  case parseCommand input of
+    Just (Open position) -> openCell state position
+    Just (Mark position) -> markCell state position
+    Just (Unmark position) -> unmarkCell state position
+    Nothing -> do
+      putStrLn "Comando inválido!"
+      return state
+
+-- Analisa o comando inserido pelo jogador
+parseCommand :: String -> Maybe Command
+parseCommand input =
+  case map toUpper input of
+    ('+' : pos) -> Just $ Mark (parsePosition pos)
+    ('-' : pos) -> Just $ Unmark (parsePosition pos)
+    pos -> Just $ Open (parsePosition pos)
+  where
+    parsePosition [col, row] = (colToIndex col, rowToIndex row)
+    colToIndex c = fromEnum c - fromEnum 'A'
+    rowToIndex r = fromEnum r - fromEnum '1'
+
+-- Abre uma célula do tabuleiro
+openCell :: GameState -> Position -> IO GameState
+openCell state position
+  | not (isValidPosition position) = do
+    putStrLn "Posição inválida!"
+    return state
+  | position `elem` markedPositions state = do
+    putStrLn "Essa posição está marcada como mina!"
+    return state
+  | otherwise = do
+    let newBoard = revealCells (board state) (bombPositions state) position
+    let newStatus = calculateGameStatus newBoard (bombPositions state)
+    return $ GameState newBoard (bombPositions state) (markedPositions state) newStatus
+
+-- Marca uma célula como mina
+markCell :: GameState -> Position -> IO GameState
+markCell state position
+  | not (isValidPosition position) = do
+    putStrLn "Posição inválida!"
+    return state
+  | position `elem` markedPositions state = do
+    putStrLn "Essa posição já está marcada como mina!"
+    return state
+  | length (markedPositions state) >= length (bombPositions state) = do
+    putStrLn "Já foram marcadas todas as bombas!"
+    return state
+  | otherwise = do
+    let newMarked = position : markedPositions state
+    let newBoard = updateBoard (board state) newMarked
+    let newStatus = calculateGameStatus newBoard (bombPositions state)
+    return $ GameState newBoard (bombPositions state) newMarked newStatus
+
+-- Desmarca uma célula que estava marcada como mina
+unmarkCell :: GameState -> Position -> IO GameState
+unmarkCell state position
+  | not (isValidPosition position) = do
+    putStrLn "Posição inválida!"
+    return state
+  | position `notElem` markedPositions state = do
+    putStrLn "Essa posição não está marcada como mina!"
+    return state
+  | otherwise = do
+    let newMarked = filter (/= position) (markedPositions state)
+    let newBoard = updateBoard (board state) newMarked
+    let newStatus = calculateGameStatus newBoard (bombPositions state)
+    return $ GameState newBoard (bombPositions state) newMarked newStatus
+
+-- Abre recursivamente as células vizinhas vazias
+revealCells :: Board -> [Position] -> Position -> Board
+revealCells board bombs position
+  | isValidPosition position && board !! row !! col == Empty && not (position `elem` bombs) =
+    let updatedBoard = updateCell board position (calculateNumber bombs position)
+        neighbors = filter (isValidPosition) (getNeighbors position)
+    in foldl (revealCells updatedBoard bombs) updatedBoard neighbors
+  | otherwise = board
+  where
+    (row, col) = position
+
+-- Atualiza uma célula no tabuleiro
+updateCell :: Board -> Position -> Cell -> Board
+updateCell board (row, col) cell =
+  take row board
+    ++ [take col (board !! row) ++ [cell] ++ drop (col + 1) (board !! row)]
+    ++ drop (row + 1) board
+
+-- Atualiza as células marcadas no tabuleiro
+updateBoard :: Board -> [Position] -> Board
+updateBoard board marked = foldl (\b pos -> updateCell b pos Marked) board marked
+
+-- Calcula o status atual do jogo
+calculateGameStatus :: Board -> [Position] -> GameStatus
+calculateGameStatus board bombs
+  | any (\pos -> board !! row !! col == Open pos) bombs = GameOver
+  | all (isCellOpen) (concat board) = Victory
+  | otherwise = InProgress
+  where
+    (row, col) = head bombs
+    isCellOpen (Open _) = True
+    isCellOpen _ = False
+
+-- Verifica se uma posição é válida no tabuleiro
+isValidPosition :: Position -> Bool
+isValidPosition (row, col) = row >= 0 && row < numRows && col >= 0 && col < numCols
+
+-- Calcula o número de bombas na vizinhança de uma célula
+calculateNumber :: [Position] -> Position -> Cell
+calculateNumber bombs position = Number count
+  where
+    neighbors = filter (isValidPosition) (getNeighbors position)
+    count = length $ filter (`elem` bombs) neighbors
+
+-- Obtém as células vizinhas de uma posição
+getNeighbors :: Position -> [Position]
+getNeighbors (row, col) =
+  [ (row - 1, col),
+    (row + 1, col),
+    (row, col - 1),
+    (row, col + 1)
+  ]
+
+-- Função principal
+main :: IO ()
+main = do
+  putStrLn "Bem-vindo ao Campo Minado!"
+  putStrLn "Digite o tamanho do tabuleiro (linhas colunas):"
+  dimensions <- getLine
+  let (numRows, numCols) = read dimensions :: (Int, Int)
+  let numCells = numRows * numCols
+  let maxBombs = numCells `div` 2
+  putStrLn "Digite o número de bombas:"
+  numBombs <- getLine
+  let bombs = read numBombs :: Int
+  let numMarked = min bombs maxBombs
+  bombPositions <- getRandomPositions numMarked (0, numRows - 1) (0, numCols - 1)
+  let board = replicate numRows (replicate numCols (Closed))
+  let initialState = GameState board bombPositions [] InProgress
+  finalState <- playGame initialState
+  printResult finalState
+
+-- Joga o jogo até que o jogo esteja encerrado
+playGame :: GameState -> IO GameState
+playGame state
+  | gameStatus state == GameOver = return state
+  | gameStatus state == Victory = return state
+  | otherwise = do
+    printBoard state
+    putStrLn "Digite um comando (posição, +posição, -posição):"
+    command <- getLine
+    newState <- executeCommand state command
+    playGame newState
+
+-- Executa um comando do jogador
+executeCommand :: GameState -> String -> IO GameState
+executeCommand state command
+  | null command = return state
+  | head command == '+' = markCell state (tail command)
+  | head command == '-' = unmarkCell state (tail command)
+  | otherwise = openCell state command
+
+-- Imprime o tabuleiro atual
+printBoard :: GameState -> IO ()
+printBoard state = do
+  putStrLn ""
+  putStrLn $ replicate (numCols * 2 + 1) '-'
+  mapM_ printRow (zip [1 ..] (board state))
+  putStrLn $ replicate (numCols * 2 + 1) '-'
+  putStrLn ""
+  where
+    printRow (row, cells) = do
+      putStr $ show row ++ "|"
+      mapM_ printCell cells
+      putStrLn "|"
+    printCell cell =
+      case cell of
+        Open (Number n) -> putStr (" " ++ show n)
+        Open Mine -> putStr " *"
+        Marked -> putStr " M"
+        Closed -> putStr "  "
+
+-- Marca uma célula como mina
+markCell :: GameState -> String -> IO GameState
+markCell state pos
+  | null pos = do
+    putStrLn "Posição inválida!"
+    return state
+  | otherwise = do
+    let position = parsePosition pos
+    if isValidPosition position
+      then do
+        let board' = markCell' (board state) position
+        let marked' = position : markedPositions state
+        let status' = calculateGameStatus board' marked' (bombPositions state)
+        return $ GameState board' (bombPositions state) marked' status'
+      else do
+        putStrLn "Posição inválida!"
+        return state
+
+-- Desmarca uma célula que estava marcada como mina
+unmarkCell :: GameState -> String -> IO GameState
+unmarkCell state pos
+  | null pos = do
+    putStrLn "Posição inválida!"
+    return state
+  | otherwise = do
+    let position = parsePosition pos
+    if isValidPosition position
+      then do
+        let board' = unmarkCell' (board state) position
+        let marked' = filter (/= position) (markedPositions state)
+        let status' = calculateGameStatus board' marked' (bombPositions state)
+        return $ GameState board' (bombPositions state) marked' status'
+      else do
+        putStrLn "Posição inválida!"
+        return state
+
+-- Abre uma célula do tabuleiro
+openCell :: GameState -> String -> IO GameState
+openCell state pos
+  | null pos = do
+    putStrLn "Posição inválida!"
+    return state
+  | otherwise = do
+    let position = parsePosition pos
+    if isValidPosition position && not (position `elem` markedPositions state)
+      then do
+        let board' = openCell' (board state) position
+        let status' = calculateGameStatus board' (markedPositions state) (bombPositions state)
+        return $ GameState board' (bombPositions state) (markedPositions state) status'
+      else do
+        putStrLn "Posição inválida!"
+        return state
+
+-- Marca uma célula como mina no tabuleiro
+markCell' :: Board -> Position -> Board
+markCell' board (row, col) = take row board ++ [markRow (board !! row) col] ++ drop (row + 1) board
+  where
+    markRow row index = take index row ++ [Marked] ++ drop (index + 1) row
+
+-- Desmarca uma célula no tabuleiro
+unmarkCell' :: Board -> Position -> Board
+unmarkCell' board (row, col) = take row board ++ [unmarkRow (board !! row) col] ++ drop (row + 1) board
+  where
+    unmarkRow row index = take index row ++ [Closed] ++ drop (index + 1) row
+
+-- Abre uma célula do tabuleiro
+openCell' :: Board -> Position -> Board
+openCell' board (row, col)
+  | isBomb (board !! row !! col) = board
+  | isOpen (board !! row !! col) = board
+  | otherwise = revealCell board (row, col)
+
+-- Abre recursivamente as células vizinhas vazias
+revealCell :: Board -> Position -> Board
+revealCell board position
+  | not (isValidPosition position) = board
+  | isNumber (board !! row !! col) = updateCell board position (Open (board !! row !! col))
+  | isBomb (board !! row !! col) = board
+  | isOpen (board !! row !! col) = board
+  | otherwise =
+    let updatedBoard = updateCell board position (Open (Number count))
+        neighbors = filter (isValidPosition) (getNeighbors position)
+    in foldl revealCell updatedBoard neighbors
+  where
+    (row, col) = position
+    count = countBombs board (row, col)
+
+-- Atualiza uma célula no tabuleiro
+updateCell :: Board -> Position -> Cell -> Board
+updateCell board (row, col) cell =
+  take row board ++ [take col (board !! row) ++ [cell] ++ drop (col + 1) (board !! row)] ++ drop (row + 1) board
+
+-- Conta o número de bombas na vizinhança de uma célula
+countBombs :: Board -> Position -> Int
+countBombs board (row, col) = length $ filter isBomb (map (getCell board) (getNeighbors (row, col)))
+
+-- Obtém uma célula do tabuleiro
+getCell :: Board -> Position -> Cell
+getCell board (row, col) = board !! row !! col
+
+-- Verifica se uma célula é uma bomba
+isBomb :: Cell -> Bool
+isBomb cell = cell == Mine
+
+-- Verifica se uma célula está aberta
+isOpen :: Cell -> Bool
+isOpen (Open _) = True
+isOpen _ = False
+
+-- Verifica se uma célula é um número
+isNumber :: Cell -> Bool
+isNumber (Open (Number _)) = True
+isNumber _ = False
+
+-- Calcula o status atual do jogo
+calculateGameStatus :: Board -> [Position] -> [Position] -> GameStatus
+calculateGameStatus board marked bombs
+  | any (\pos -> getCell board pos == Open Mine) bombs = GameOver
+  | all (\pos -> isOpen (getCell board pos) || isBomb (getCell board pos)) marked = Victory
+  | otherwise = InProgress
+
+-- Converte uma string de posição para uma posição válida
+parsePosition :: String -> Position
+parsePosition [col, row] = (colToIndex col, rowToIndex row)
+  where
+    colToIndex c = fromEnum c - fromEnum 'A'
+    rowToIndex r = fromEnum r - fromEnum '1'
+
+-- Imprime o resultado final do jogo
+printResult :: GameState -> IO ()
+printResult state
+  | gameStatus state == GameOver = putStrLn "Você perdeu! :("
+  | gameStatus state == Victory = putStrLn "Você ganhou! Parabéns! :)"
+  | otherwise = putStrLn "Jogo encerrado."
+
+-- Função principal
+main :: IO ()
+main = do
+  putStrLn "Bem-vindo ao Campo Minado!"
+  putStrLn "Digite o tamanho do tabuleiro (linhas colunas):"
+  dimensions <- getLine
+  let (numRows, numCols) = read dimensions :: (Int, Int)
+  let numCells = numRows * numCols
+  let maxBombs = numCells `div` 2
+  putStrLn "Digite o número de bombas:"
+  numBombs <- getLine
+  let bombs = read numBombs :: Int
+  let numMarked = min bombs maxBombs
+  bombPositions <- getRandomPositions numMarked (0, numRows - 1) (0, numCols - 1)
+  let board = replicate numRows (replicate numCols Closed)
+  let initialState = GameState board bombPositions [] InProgress
+  finalState <- playGame initialState
+  printResult finalState
+
+-- Joga o jogo até que o jogo esteja encerrado
+playGame :: GameState -> IO GameState
+playGame state
+  | gameStatus state == GameOver = return state
+  | gameStatus state == Victory = return state
+  | otherwise = do
+    printBoard state
+    putStrLn "Digite um comando (posição, +posição, -posição):"
+    command <- getLine
+    newState <- executeCommand state command
+    playGame newState
+
+-- Executa um comando do jogador
+executeCommand :: GameState -> String -> IO GameState
+executeCommand state command
+  | null command = return state
+  | head command == '+' = markCell state (tail command)
+  | head command == '-' = unmarkCell state (tail command)
+  | otherwise = openCell state command
+
+-- Imprime o tabuleiro atual
+printBoard :: GameState -> IO ()
+printBoard state = do
+  putStrLn ""
+  putStrLn $ replicate (numCols * 2 + 1) '-'
+  mapM_ printRow (zip [1 ..] (board state))
+  putStrLn $ replicate (numCols * 2 + 1) '-'
+  putStrLn ""
+  where
+    printRow (row, cells) = do
+      putStr $ show row ++ "|"
+      mapM_ printCell cells
+      putStrLn "|"
+
+-- Imprime uma célula do tabuleiro
+printCell :: Cell -> IO ()
+printCell cell =
+  case cell of
+    Open (Number n) -> putStr (" " ++ show n)
+    Open Mine -> putStr " *"
+    Marked -> putStr " M"
+    Closed -> putStr "  "
